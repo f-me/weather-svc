@@ -13,6 +13,7 @@ import Data.Aeson.Lens
 import System.Environment (getArgs, getProgName)
 import qualified Data.Configurator as Config
 import Network.Wreq hiding (Proxy)
+import Network.Wai.Middleware.RequestLogger (logStdoutDev)
 import Network.Wai.Handler.Warp (run)
 import Servant
 
@@ -37,8 +38,10 @@ main = do
       apiKey     <- Config.require conf "api.key"
       serverPort <- Config.require conf "server.port"
       -- statsdPort <- Config.require conf "statsd.port"
+      -- statsd request
 
       run serverPort
+        $ logStdoutDev
         $ serve (Proxy :: Proxy API)
         $ curry $ \case
           (Just lon, Just lat) -> do
@@ -54,5 +57,3 @@ main = do
           _ -> left $ err401 {errBody = "Invalid lon/lat"}
 
     _ -> error $ "Usage: " ++ progName ++ " <config>"
-
--- getWeather apiKey lon lat

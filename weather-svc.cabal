@@ -27,6 +27,7 @@ executable weather-svc
     transformers,
     double-conversion,
     text,
+    wai-extra,
     warp,
     wreq
 
