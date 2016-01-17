@@ -3,17 +3,17 @@
 module Main where
 
 
-import Control.Monad.IO.Class (liftIO)
+import Control.Monad.IO.Class
 import Control.Monad.Trans.Either (left)
 import Control.Lens
 
 import Data.Aeson.Lens
 import Data.Text (Text)
-import Data.Monoid ((<>))
 import Data.IORef
+import Data.Map (Map)
 import qualified Data.Map as Map
 import qualified Data.Double.Conversion.Text as D
-import Data.Time (getCurrentTime, diffUTCTime)
+import Data.Time
 
 import System.Environment (getArgs, getProgName)
 import qualified Data.Configurator as Config
@@ -53,10 +53,10 @@ main = do
       conf <- Config.load [Config.Required configFile]
       apiKey      <- Config.require conf "api.key"
       serverPort  <- Config.require conf "server.port"
-      cachePeriod <- (*60) <$> Config.require conf "cache.minutes" :: IO Int
+      cachePeriod <- (*60) <$> Config.require conf "cache.minutes"
       -- statsdPort <- Config.require conf "statsd.port"
 
-      cache <- newIORef Map.empty
+      cache <- newCache
 
       run serverPort
         $ logStdoutDev
@@ -65,23 +65,40 @@ main = do
           (Just lon, Just lat) -> do
             let lonT = D.toShortest lon
             let latT = D.toShortest lat
-            let cacheKey = lonT <> ":" <> latT
 
-            curTime <- liftIO getCurrentTime
-
-            cacheMap <- liftIO (readIORef cache)
-            case Map.lookup cacheKey cacheMap of
-              Just (time, temp)
-                | round (diffUTCTime curTime time) < cachePeriod
-                  -> return temp
-
-              _ -> liftIO $ do
+            res <- cacheLookup cache (fromInteger cachePeriod) (lonT, latT)
+              (\_ -> do
                 Just temp <- getWeather apiKey lonT latT
-                let tempT = D.toShortest temp
-                atomicModifyIORef' cache
-                  $ (,()) . Map.insert cacheKey (curTime, tempT)
-                return tempT
+                return $ D.toShortest temp
+              )
+            case res of
+              Left temp -> return temp -- report cache miss
+              Right temp -> return temp
 
           _ -> left $ err401 {errBody = "Invalid lon/lat"}
 
     _ -> error $ "Usage: " ++ progName ++ " <config>"
+
+
+
+type Cache key val = IORef (Map key (UTCTime, val))
+
+newCache :: MonadIO m => m (Cache k v)
+newCache = liftIO $ newIORef Map.empty
+
+cacheLookup
+  :: (MonadIO m, Ord key)
+  => Cache key val -> NominalDiffTime
+  -> key -> (key -> IO val)
+  -> m (Either val val)
+cacheLookup cache ttl cacheKey getVal = liftIO $ do
+  curTime <- getCurrentTime
+  cacheMap <- readIORef cache
+  case Map.lookup cacheKey cacheMap of
+    Just (cacheTime, val)
+      | diffUTCTime curTime cacheTime < ttl -> return $ Right val
+    _ -> do
+      val <- getVal cacheKey
+      atomicModifyIORef' cache
+        $ (,()) . Map.insert cacheKey (curTime, val)
+      return $ Left val
