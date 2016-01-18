@@ -53,10 +53,12 @@ main = do
       conf <- Config.load [Config.Required configFile]
       apiKey      <- Config.require conf "api.key"
       serverPort  <- Config.require conf "server.port"
-      cachePeriod <- (*60) <$> Config.require conf "cache.minutes"
-      -- statsdPort <- Config.require conf "statsd.port"
+      cacheOpts   <- CacheOptions
+                  <$> (fromInteger . (*60)
+                      <$> Config.require conf "cache.minutes")
+                  <*> Config.require conf "cache.size"
 
-      cache <- newCache
+      cache <- newCache cacheOpts
 
       run serverPort
         $ logStdoutDev
@@ -66,7 +68,7 @@ main = do
             let lonT = D.toShortest lon
             let latT = D.toShortest lat
 
-            res <- cacheLookup cache (fromInteger cachePeriod) (lonT, latT)
+            res <- cacheLookup cache (lonT, latT)
               (\_ -> do
                 Just temp <- getWeather apiKey lonT latT
                 return $ D.toShortest temp
@@ -81,24 +83,46 @@ main = do
 
 
 
-type Cache key val = IORef (Map key (UTCTime, val))
+type CacheMap key val = Map key (UTCTime, val)
+type Cache key val = IORef (CacheOptions, CacheMap key val)
 
-newCache :: MonadIO m => m (Cache k v)
-newCache = liftIO $ newIORef Map.empty
+data CacheOptions = CacheOptions
+  { retainPeriod :: NominalDiffTime
+  , maxSize      :: Int
+  }
 
+
+newCache :: MonadIO m => CacheOptions -> m (Cache k v)
+newCache opts = liftIO $ newIORef (opts, Map.empty)
+
+-- FIXME: use priority queue
 cacheLookup
   :: (MonadIO m, Ord key)
-  => Cache key val -> NominalDiffTime
-  -> key -> (key -> IO val)
+  => Cache key val -> key -> (key -> IO val)
   -> m (Either val val)
-cacheLookup cache ttl cacheKey getVal = liftIO $ do
+cacheLookup cache cacheKey getVal = liftIO $ do
+  (CacheOptions{..}, cacheMap) <- readIORef cache
+
   curTime <- getCurrentTime
-  cacheMap <- readIORef cache
+  let chkTime t = diffUTCTime curTime t < retainPeriod
+
   case Map.lookup cacheKey cacheMap of
     Just (cacheTime, val)
-      | diffUTCTime curTime cacheTime < ttl -> return $ Right val
+      | chkTime cacheTime -> return $ Right val
     _ -> do
       val <- getVal cacheKey
-      atomicModifyIORef' cache
-        $ (,()) . Map.insert cacheKey (curTime, val)
+      atomicModifyIORef' cache $ \(opts, m) ->
+        (,())
+        (opts, Map.insert cacheKey (curTime, val) $ dropLRU chkTime maxSize m)
       return $ Left val
+
+
+dropLRU
+  :: Ord key
+  => (UTCTime -> Bool) ->  Int
+  -> CacheMap key val -> CacheMap key val
+dropLRU chkTime maxSize m
+  | Map.size m < maxSize = m
+  | otherwise
+    = Map.fromList $ take maxSize $ Map.toList
+    $ Map.filter (chkTime . fst) m

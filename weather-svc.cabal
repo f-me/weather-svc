@@ -36,5 +36,5 @@ executable weather-svc
 
   default-extensions:
     OverloadedStrings,
-    LambdaCase, TupleSections,
+    LambdaCase, TupleSections, RecordWildCards,
     DataKinds, TypeFamilies, TypeOperators
