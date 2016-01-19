@@ -32,7 +32,9 @@ executable weather-svc
     text,
     wai-extra,
     warp,
-    wreq
+    wreq,
+    ekg-core,
+    ekg-statsd
 
   default-extensions:
     OverloadedStrings,

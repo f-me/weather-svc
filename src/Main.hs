@@ -16,6 +16,10 @@ import qualified Data.Double.Conversion.Text as D
 import Data.Time
 
 import System.Environment (getArgs, getProgName)
+import qualified System.Metrics as Metrics
+import qualified System.Metrics.Counter as Counter
+-- import qualified System.Metrics.Gauge as Gauge
+import System.Remote.Monitoring.Statsd
 import qualified Data.Configurator as Config
 import Network.Wreq hiding (Proxy)
 import Network.Wai.Middleware.RequestLogger (logStdoutDev)
@@ -54,9 +58,23 @@ main = do
       apiKey      <- Config.require conf "api.key"
       serverPort  <- Config.require conf "server.port"
       cacheOpts   <- CacheOptions
-                  <$> (fromInteger . (*60)
-                      <$> Config.require conf "cache.minutes")
-                  <*> Config.require conf "cache.size"
+          <$> (fromInteger . (*60)
+              <$> Config.require conf "cache.minutes")
+          <*> Config.require conf "cache.size"
+      statsdOpts  <- StatsdOptions
+          <$> Config.require conf "statsd.host"
+          <*> Config.require conf "statsd.port"
+          <*> Config.require conf "statsd.flushInterval"
+          <*> Config.require conf "statsd.debug"
+          <*> Config.require conf "statsd.prefix"
+          <*> Config.require conf "statsd.suffix"
+
+      metricStore <- Metrics.newStore
+      statQueries <- Metrics.createCounter "queries" metricStore
+      -- statErrors  <- Metrics.createCounter "errors" metricStore -- FIXME: catch them
+      statMisses  <- Metrics.createCounter "cache_missess" metricStore
+      -- statTime    <- Metrics.createGauge "query_ms" metricStore -- FIXME: measure?
+      _ <- forkStatsd statsdOpts metricStore
 
       cache <- newCache cacheOpts
 
@@ -65,6 +83,7 @@ main = do
         $ serve (Proxy :: Proxy API)
         $ curry $ \case
           (Just lon, Just lat) -> do
+            liftIO $ Counter.inc statQueries
             let lonT = D.toShortest lon
             let latT = D.toShortest lat
 
@@ -74,7 +93,9 @@ main = do
                 return $ D.toShortest temp
               )
             case res of
-              Left temp -> return temp -- report cache miss
+              Left temp -> do
+                liftIO $ Counter.inc statMisses
+                return temp
               Right temp -> return temp
 
           _ -> left $ err401 {errBody = "Invalid lon/lat"}
